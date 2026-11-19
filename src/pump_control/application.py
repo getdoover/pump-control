@@ -288,6 +288,22 @@ class PumpControlApplication(Application):
             ends_at = self._tag(model.tag_key(t, "ends_at"))
             if ends_at is not None:
                 await self._set(model.tag_key(t, "ends_at"), None)
+        if current is not None and current != prev_running and not after and not warn:
+            # The pump has moved since a failed command; its warning no longer
+            # describes it.
+            await self._set(model.tag_key(t, "cmd_warning_hidden"), True)
+        await self._refresh_controls(t)
+
+    async def _refresh_controls(self, t: str):
+        """Show Start, Stop or both, from the reported state (see model.controls)."""
+        show_start, show_stop = model.controls(
+            self._tag(model.tag_key(t, "running")),
+            self._tag(model.tag_key(t, "pending")),
+            self._tag(model.tag_key(t, "fault")),
+            self._tag(model.tag_key(t, "cmd_warning_hidden"), True) is False,
+        )
+        await self._set(model.tag_key(t, "start_hidden"), not show_start)
+        await self._set(model.tag_key(t, "stop_hidden"), not show_stop)
 
     async def _handle_reply(self, data: dict):
         """An edge reply on the Command Channel: {"request_id", "ok", "error"}."""
@@ -323,6 +339,7 @@ class PumpControlApplication(Application):
                 await self._set(model.tag_key(t, "cmd_text"), text)
                 await self._set(model.tag_key(t, "cmd_warning"), text)
                 await self._set(model.tag_key(t, "cmd_warning_hidden"), False)
+            await self._refresh_controls(t)
             return
 
     async def _send_command(self, pump: dict, verb: str, duration_s: int | None):
@@ -348,6 +365,7 @@ class PumpControlApplication(Application):
         await self._set(model.tag_key(t, "last_command"), verb)
         await self._set(model.tag_key(t, "cmd_text"), text)
         await self._set(model.tag_key(t, "cmd_warning_hidden"), True)
+        await self._refresh_controls(t)
 
     def _pump_for(self, method: str, suffix: str) -> dict:
         s = method[len("p_") : -len(suffix)]

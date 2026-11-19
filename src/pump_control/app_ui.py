@@ -2,7 +2,8 @@
 role, the fill settings and status in the Auto-fill role.
 
 The schema is published once per deployment, so everything that changes is
-bound to tags; buttons and inputs arrive on ui_cmds and are handled in
+bound to tags, including which of Start / Stop is offered (start_hidden /
+stop_hidden, see model.controls); buttons and inputs arrive on ui_cmds and are handled in
 application.py.
 """
 
@@ -58,6 +59,7 @@ def pump_elements(pump: dict) -> list:
                 min_val=1,
                 max_val=float(pump["max_run_min"]),
                 default=float(pump["default_run_min"]),
+                hidden=_tag(tag_key(s, "start_hidden"), "boolean", False),
                 position=5,
             )
         )
@@ -67,12 +69,14 @@ def pump_elements(pump: dict) -> list:
             name=f"p_{s}_start",
             requires_confirm=True,
             colour=ui.Colour.green,
+            hidden=_tag(tag_key(s, "start_hidden"), "boolean", False),
             position=6,
         ),
         ui.Button(
             "Stop",
             name=f"p_{s}_stop",
             colour=ui.Colour.red,
+            hidden=_tag(tag_key(s, "stop_hidden"), "boolean", False),
             position=7,
         ),
     ]

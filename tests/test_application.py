@@ -293,3 +293,53 @@ async def test_operator_edits_validate_and_publish():
 
 def test_tag_keys_used_by_peers():
     assert model.tag_key("pump_call", "running") == "p_pump_call_running"
+
+
+def shown(app, t="pump_1"):
+    return (
+        not (tag(app, f"p_{t}_start_hidden") or False),
+        not (tag(app, f"p_{t}_stop_hidden") or False),
+    )
+
+
+@pytest.mark.asyncio
+async def test_controls_follow_the_reported_state():
+    app = await make_app(PUMP_CONFIG, ui_values={"p_pump_1_minutes": 5})
+    await app.on_schedule(None)
+    assert shown(app) == (True, True)  # no data: both
+
+    await app.on_message_create(msg("io_state", {"pump_1": 0}))
+    assert shown(app) == (True, False)  # stopped: Start only
+
+    await app.on_start(FakeCtx("p_pump_1_start"), None)
+    assert shown(app) == (True, True)  # pending: both
+
+    await app.on_message_create(msg("io_state", {"pump_1": 1}))
+    assert shown(app) == (False, True)  # running: Stop only
+
+    await app.on_message_create(msg("io_state", {"pump_1_fault": 1}))
+    assert shown(app) == (True, True)  # fault: both
+    await app.on_message_create(msg("io_state", {"pump_1_fault": 0}))
+    assert shown(app) == (False, True)
+
+    await app.on_stop(FakeCtx("p_pump_1_stop"), None)
+    rid = app.api.messages[-1][1]["request_id"]
+    await app.on_message_create(
+        msg("io_commands", {"request_id": rid, "ok": False, "error": "interlock"})
+    )
+    assert shown(app) == (True, True)  # rejected: both
+    await app.on_message_create(msg("io_state", {"pump_1": 0}))
+    assert shown(app) == (True, False)  # it moved since: trusted again
+    assert tag(app, "p_pump_1_cmd_warning_hidden") is True
+
+
+@pytest.mark.asyncio
+async def test_start_and_stop_are_bound_to_their_hidden_tags():
+    app = await make_app(PUMP_CONFIG)
+    from pump_control.app_ui import pump_elements
+    from pump_control.application import parse_pumps
+
+    elements = {e.name: e.to_dict() for e in pump_elements(parse_pumps(app.config)[0])}
+    assert "p_pump_1_start_hidden" in str(elements["p_pump_1_start"]["hidden"])
+    assert "p_pump_1_start_hidden" in str(elements["p_pump_1_minutes"]["hidden"])
+    assert "p_pump_1_stop_hidden" in str(elements["p_pump_1_stop"]["hidden"])

@@ -308,6 +308,21 @@ def evaluate_pending(
     return pending, f"{prefix}, waiting for the pump to report {want}", False
 
 
+def controls(
+    running: bool | None, pending: dict | None, fault: bool | None, problem: bool
+) -> tuple[bool, bool]:
+    """(show Start, show Stop): offer the control that changes the reported state.
+
+    Stopped shows only Start; Running shows only Stop. When the reported state
+    can't be trusted -- no reading yet, a command awaiting confirmation, a fault
+    reported, or a command not confirmed or rejected -- both are shown, because
+    then an explicit Stop is the safe thing to have to hand.
+    """
+    if running is None or pending or fault or problem:
+        return True, True
+    return (not running, bool(running))
+
+
 # -- auto-fill ------------------------------------------------------------------
 
 

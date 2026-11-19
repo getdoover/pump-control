@@ -285,7 +285,8 @@ class PumpControlConfig(config.Schema):
         position=26,
     )
 
-    position = config.ApplicationPosition(position=27)
+    position = config.ApplicationPosition(default=20, position=27)
+    default_open = config.ApplicationDefaultOpen(default=True, position=28)
 
 
 def export():

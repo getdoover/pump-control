@@ -238,3 +238,21 @@ def test_settings_shapes():
         "app_key": "pump_control_1",
         "target": "pump_1",
     }
+
+
+@pytest.mark.parametrize(
+    "running, pending, fault, problem, expected",
+    [
+        (False, None, None, False, (True, False)),  # stopped: Start only
+        (True, None, None, False, (False, True)),  # running: Stop only
+        (None, None, None, False, (True, True)),  # no reading yet
+        (False, {"command": "start"}, None, False, (True, True)),  # pending
+        (True, {"command": "stop"}, False, False, (True, True)),  # pending
+        (True, None, True, False, (True, True)),  # fault reported
+        (False, None, None, True, (True, True)),  # not confirmed / rejected
+    ],
+)
+def test_controls_offer_the_action_that_changes_the_state(
+    running, pending, fault, problem, expected
+):
+    assert model.controls(running, pending, fault, problem) == expected

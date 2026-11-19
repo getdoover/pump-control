@@ -58,6 +58,13 @@ Install it on the device that has the pumps. Each configured pump gets its own s
 | **Last Started / Last Stopped** | When the reported state last changed |
 | **Run Hours Today / Total**, **Starts Today** | Counted from the reported state, in the configured timezone |
 
+Only the control that changes the reported state is offered: a pump reporting
+**Stopped** shows only **Start For (min)** / **Start**, one reporting **Running**
+shows only **Stop** (with **Time Remaining** for a timed run). While the state is
+Unknown (no reading yet), a command is waiting for confirmation, a fault is
+reported, or a command was not confirmed or was rejected, both are shown: when the
+reported state can't be trusted, an explicit Stop is the safe action to have to hand.
+
 If **Auto-filled By** names a tank's device, an **Auto-Fill** line reads, e.g.,
 "Controlled by North Tank: Enabled, Filling". It is read-only: the fill settings
 belong to the tank.
@@ -104,6 +111,8 @@ Changing the matching config values and redeploying resets them to the new confi
 | **Subscription** | `dv_proc_subscriptions` | Channels that invoke the app | `io_state`, `ui_cmds`, `io_commands` |
 | **Schedule** | `dv_proc_schedules` | Periodic refresh of run hours, timeouts and the linked device | `rate(5 minutes)` |
 | **Devices** | `dv_proc_extended_permissions` | Other devices this app may read: add the linked tank or pump device here | none |
+| **Position** | `dv_app_position` | Hidden. Where the app sits on the device page; smaller is higher | `20` |
+| **Default Open** | `dv_app_default_open` | Hidden. Whether the app's panel starts expanded | `true` |
 
 Each entry in **Pumps**:
 

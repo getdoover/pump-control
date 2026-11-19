@@ -1,0 +1,29 @@
+{
+    "pump_control": {
+        "name": "pump_control",
+        "display_name": "Pump Control",
+        "type": "PRO",
+        "visibility": "PUB",
+        "allow_many": true,
+        "description": "Start, stop and monitor pumps from anywhere, and set the auto-fill levels of the tanks they fill.",
+        "long_description": "README.md",
+        "depends_on": [],
+        "organisation_id": 93957122026437134,
+        "export_config_command": "export-config",
+        "export_ui_command": "export-ui",
+        "export_notification_command": "export-notifications",
+        "lambda_config": {
+            "Environment": {},
+            "Runtime": "python3.13",
+            "Timeout": 60,
+            "Handler": "src.pump_control.handler",
+            "MemorySize": 128,
+            "Architectures": [
+                "arm64"
+            ]
+        },
+        "repository_url": "https://github.com/getdoover/pump-control",
+        "data_access": "read_write",
+        "has_ui": true
+    }
+}

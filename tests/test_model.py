@@ -256,3 +256,135 @@ def test_controls_offer_the_action_that_changes_the_state(
     running, pending, fault, problem, expected
 ):
     assert model.controls(running, pending, fault, problem) == expected
+
+
+# -- readings -------------------------------------------------------------------
+
+PSI = {
+    "name": "Pressure 1",
+    "key": "pressure_1",
+    "input_type": model.INPUT_ANALOG,
+    "input_min": 4.0,
+    "input_max": 20.0,
+    "value_min": 0.0,
+    "value_max": 145.0,
+    "units": "PSI",
+    "precision": 1,
+    "warn_low": None,
+    "warn_high": None,
+}
+RPM = {
+    "name": "Engine RPM",
+    "key": "engine_rpm",
+    "input_type": model.INPUT_SCALED,
+    "multiplier": 1.0,
+    "offset": 0.0,
+    "units": "",
+    "precision": 0,
+}
+
+
+def test_analog_scaling_matches_site_formula():
+    for ma in (4.0, 8.0, 12.5, 20.0):
+        value, fault = model.scale_reading(ma, PSI)
+        assert fault is None
+        assert value == pytest.approx((ma - 4) * 9.0625)
+
+
+def test_analog_under_and_over_range_are_sensor_faults():
+    value, fault = model.scale_reading(0.0, PSI)  # 0 mA: dead loop
+    assert value is None and "under" in fault
+    value, fault = model.scale_reading(3.59, PSI)
+    assert value is None and "under" in fault
+    value, fault = model.scale_reading(21.5, PSI)
+    assert value is None and "over" in fault
+
+
+def test_analog_slightly_outside_range_is_clamped_not_faulted():
+    assert model.scale_reading(3.7, PSI) == (0.0, None)
+    assert model.scale_reading(20.6, PSI) == (145.0, None)
+
+
+def test_analog_inverted_and_empty_ranges():
+    inverted = {**PSI, "input_min": 20.0, "input_max": 4.0}
+    assert model.scale_reading(20.0, inverted)[0] == pytest.approx(0.0)
+    assert model.scale_reading(4.0, inverted)[0] == pytest.approx(145.0)
+    value, fault = model.scale_reading(12.0, {**PSI, "input_max": 4.0})
+    assert value is None and "empty" in fault
+
+
+def test_scaled_reading():
+    assert model.scale_reading(1580, RPM) == (1580.0, None)
+    spec = {**RPM, "multiplier": 0.1, "offset": -2}
+    assert model.scale_reading("285", spec)[0] == pytest.approx(26.5)
+    assert model.scale_reading(True, spec)[0] == pytest.approx(-1.9)
+
+
+def test_unreadable_input_is_a_fault():
+    value, fault = model.scale_reading("n/a", RPM)
+    assert value is None and "unreadable" in fault
+
+
+def test_evaluate_reading_no_data_is_quiet():
+    out = model.evaluate_reading(PSI, None, None, 1_000, 3600)
+    assert out["status"] == model.READING_NO_DATA
+    assert out["warning"] == "" and out["fault"] is False and out["value"] is None
+
+
+def test_evaluate_reading_fault_is_shown_not_dropped():
+    out = model.evaluate_reading(PSI, 0.0, 0, 60_000, 3600)
+    assert out["status"] == model.READING_FAULT
+    assert out["fault"] is True and out["value"] is None
+    assert out["warning"].startswith("Pressure 1: sensor fault")
+
+
+def test_evaluate_reading_flat_zero_scaled_is_a_value():
+    # Zero is a value, not a missing field.
+    out = model.evaluate_reading(RPM, 0, 0, 60_000, 3600)
+    assert out["status"] == model.READING_OK and out["value"] == 0.0
+    assert out["warning"] == ""
+
+
+def test_evaluate_reading_stale_keeps_its_value():
+    hour = 3_600_000
+    out = model.evaluate_reading(RPM, 1580, 0, 3 * hour, 7200)
+    assert out["stale"] is True and out["value"] == 1580.0
+    assert out["status"] == model.READING_STALE
+    assert "no new reading for 3 h" in out["warning"]
+    # faulted and stale: both said
+    out = model.evaluate_reading(PSI, 0.0, 0, 3 * hour, 7200)
+    assert out["status"] == model.READING_FAULT
+    assert "sensor fault" in out["warning"] and "3 h" in out["warning"]
+
+
+def test_evaluate_reading_limits():
+    spec = {**PSI, "warn_low": 10.0, "warn_high": 100.0}
+    low = model.evaluate_reading(spec, 4.5, 0, 0, 3600)
+    assert (
+        low["status"] == model.READING_LOW and "below the low warning" in low["warning"]
+    )
+    high = model.evaluate_reading(spec, 19.0, 0, 0, 3600)
+    assert high["status"] == model.READING_HIGH
+    assert "above the high warning (100.0 PSI)" in high["warning"]
+    ok = model.evaluate_reading(spec, 10.0, 0, 0, 3600)
+    assert ok["status"] == model.READING_OK
+
+
+def test_reading_keys_and_summary():
+    assert model.reading_key("Engine RPM (provisional)") == "engine_rpm_provisional"
+    assert model.reading_tag("pressure_1", "raw") == "r_pressure_1_raw"
+    assert model.readings_summary([]) == model.READING_NO_DATA
+    assert model.readings_summary([model.READING_OK]) == model.READING_OK
+    assert (
+        model.readings_summary(
+            [
+                model.READING_FAULT,
+                model.READING_FAULT,
+                model.READING_OK,
+                model.READING_STALE,
+            ]
+        )
+        == "2 sensor faults, 1 stale"
+    )
+    assert model.format_age(90 * 60) == "1 h 30 min"
+    assert model.format_age(26 * 3600) == "1 d 2 h"

@@ -7,7 +7,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/getdoover/pump-control/blob/main/LICENSE)
 
-[Overview](#overview) • [Roles](#roles) • [Configuration](#configuration) • [Tags](#tags) • [Channels](#channels)
+[Overview](#overview) • [Roles](#roles) • [Readings](#readings) • [Configuration](#configuration) • [Tags](#tags) • [Channels](#channels)
 
 <br/>
 
@@ -31,6 +31,9 @@ Key capabilities:
   optional fault input
 - **Run statistics** -- last started and stopped, time remaining on a timed run, run hours
   today and in total, and starts today, all worked out from the reported state
+- **Readings** -- pressures, engine data or any other value on the pump's device, scaled
+  from the raw signal, shown under the pumps with its fault or stale state, and published
+  as tags for other apps (a pump analysis, a report)
 - **Auto-fill** -- installed on a tank, the same app holds the fill settings (enable,
   start level, stop level, max shift) that operators change on the page, and shows whether
   the linked pump is filling
@@ -88,6 +91,30 @@ Changing the matching config values and redeploying resets them to the new confi
 
 <br/>
 
+## Readings
+
+The Pump role can also show the telemetry that belongs with the pumps: suction and
+discharge pressure, engine speed and hours, coolant temperature, fuel, and so on. Each
+entry in **Readings** turns one raw input into a value:
+
+- **Analog** maps the input range onto the value range, e.g. 4–20 mA onto 0–145 PSI. An
+  input well outside its range -- below 2.5 % of the span under the minimum, or above
+  6.25 % of the span over the maximum (3.6 mA and 21 mA on a 4–20 mA loop) -- is a
+  **sensor fault**: 0 mA on a 4–20 mA loop is a dead loop, not a reading of −36 PSI.
+  Inputs between those limits and the range ends are clamped to the value range.
+- **Scaled** computes value = raw × Multiplier + Offset, for values that arrive already in
+  engineering units or need only a factor (Modbus registers, counters, voltages).
+
+Every enabled reading has a line in the **Readings** section under the pumps, with its
+value and units. A reading is never dropped for what it reads: zero is a value, a faulted
+reading shows its fault, and one with no new value for **Reading Stale After** shows its
+age and keeps its last value. Below each value, a warning appears while the reading is
+faulted, stale or outside its optional low / high warning. The section's status sums it
+up, e.g. "2 sensor faults, 1 stale". To leave a reading off a device where it doesn't
+exist, switch its **Enabled** off in config.
+
+<br/>
+
 ## Configuration
 
 | Setting | Key | Description | Default |
@@ -104,6 +131,8 @@ Changing the matching config values and redeploying resets them to the new confi
 | **Stop Level (%)** | `stop_level` | Auto-fill role: default Stop At | `90.0` |
 | **Max Shift (min)** | `max_shift_min` | Auto-fill role: default Max Shift | `60.0` |
 | **Enabled by Default** | `auto_fill_enabled` | Auto-fill role: whether auto-fill starts enabled | `true` |
+| **Readings** | `readings` | Pump role, optional: telemetry to scale, show and publish (below) | `[]` |
+| **Reading Stale After (min)** | `reading_stale_after_min` | Pump role: how long without a new value before a reading shows as stale | `120` |
 | **Command Channel** | `command_channel` | Where commands go | `io_commands` |
 | **Settings Channel** | `settings_channel` | Whose aggregate carries the settings | `control_settings` |
 | **Confirm Timeout (s)** | `confirm_timeout_s` | How long a command may wait for the reported state | `120` |
@@ -125,6 +154,22 @@ Each entry in **Pumps**:
 | **Default Run Duration (min)** | `default_run_min` | Run time a Timed start offers | `60.0` |
 | **Max Run Duration (min)** | `max_run_min` | Longest run time allowed | `720.0` |
 | **Mode** | `mode` | `Timed` or `Latched` | `Timed` |
+
+Each entry in **Readings**:
+
+| Setting | Key | Description | Default |
+|---------|-----|-------------|---------|
+| **Name** | `name` | What operators call the reading, e.g. `Suction Pressure` | `Reading 1` |
+| **Key** | `key` | Id used in the reading's tags; made from the name when blank | blank |
+| **Enabled** | `enabled` | Off leaves the reading out entirely; on, it is always shown | `true` |
+| **Input Message Path** | `input_path` | Message path to the raw value | `$io_state.reading_1` |
+| **Input Type** | `input_type` | `Analog` or `Scaled` | `Analog` |
+| **Input Min / Input Max** | `input_min`, `input_max` | Analog: the raw input range | `4`, `20` |
+| **Value Min / Value Max** | `value_min`, `value_max` | Analog: the values at the ends of the input range | `0`, `100` |
+| **Multiplier / Offset** | `multiplier`, `offset` | Scaled: value = raw × Multiplier + Offset | `1`, `0` |
+| **Units** | `units` | Shown after the value | blank |
+| **Decimal Precision** | `precision` | Decimal places shown | `1` |
+| **Low Warning / High Warning** | `warn_low`, `warn_high` | Optional limits that raise a warning on the page | none |
 
 Input paths take the form `$channel.path.to.value` (or `$channel:path.to.value`), read
 from each message on a subscribed channel; keep every channel used in a path in
@@ -152,6 +197,22 @@ Pump role, one set per pump, keyed by its Target ID (`p_<target>_<field>`):
 | `p_<target>_hours_today`, `p_<target>_hours_total`, `p_<target>_starts_today` | Run statistics |
 | `p_<target>_pending` | The command awaiting confirmation |
 
+Readings, one set per enabled reading, keyed by its Key (`r_<key>_<field>`):
+
+| Tag | Meaning |
+|-----|---------|
+| `r_<key>` | The scaled value; null until a reading arrives and while the sensor is faulted |
+| `r_<key>_raw` | The last raw input, as received |
+| `r_<key>_fault` | `true` while the input is a sensor fault (under / over range or unreadable) |
+| `r_<key>_ts` | Unix ms the last raw input arrived |
+| `r_<key>_status` | `OK`, `Low`, `High`, `Sensor fault`, `Stale` or `No reading yet` |
+| `r_<key>_name` | The reading's name |
+
+Another app on the device consumes a reading through `{app_name, tag_name}`, e.g. a pump
+analysis taking suction pressure from `pump_control_1` / `r_pressure_1`. Because a faulted
+reading publishes null rather than a scaled dead-loop value, consumers never compute from
+a disconnected sensor.
+
 Auto-fill role:
 
 | Tag | Meaning |
@@ -167,7 +228,7 @@ Auto-fill role:
 
 ### Inputs
 
-Raw run-state and fault values arrive as messages on the channels in the input paths
+Raw run-state, fault and reading values arrive as messages on the channels in the input paths
 (by default `io_state`), and buttons on `ui_cmds`. The Auto-fill role reads its level from
 another app's tag on the same device, and the linked pump's tags from the pump device.
 

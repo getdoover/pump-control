@@ -1,6 +1,10 @@
 """The page. Built from config at deployment: one section per pump in the Pump
 role, the fill settings and status in the Auto-fill role.
 
+Enabled Readings get a section of their own under the pumps: each shows its
+value, and a warning line while it is faulted, stale or outside its limits. A
+reading is never hidden for its data; only its config Enabled switch removes it.
+
 The schema is published once per deployment, so everything that changes is
 bound to tags, including which of Start / Stop is offered (start_hidden /
 stop_hidden, see model.controls); buttons and inputs arrive on ui_cmds and are handled in
@@ -12,7 +16,14 @@ from pathlib import Path
 from pydoover import ui
 
 from .app_tags import PumpControlTags
-from .model import MODE_TIMED, ROLE_AUTO_FILL, slug, tag_key
+from .model import (
+    MODE_TIMED,
+    READING_NO_DATA,
+    ROLE_AUTO_FILL,
+    reading_tag,
+    slug,
+    tag_key,
+)
 
 
 def _tag(key: str, tag_type: str, default=None):
@@ -130,9 +141,37 @@ def pump_elements(pump: dict) -> list:
     return children
 
 
+def reading_elements(readings: list[dict]) -> list:
+    """Each reading's value, then its fault / stale / limit warning."""
+    children = []
+    for index, reading in enumerate(readings):
+        k = reading["key"]
+        extra = {"units": reading["units"]} if reading["units"] else {}
+        children.append(
+            ui.NumericVariable(
+                reading["name"],
+                name=reading_tag(k),
+                value=_tag(reading_tag(k), "number"),
+                precision=int(reading["precision"]),
+                position=index * 2 + 1,
+                **extra,
+            )
+        )
+        children.append(
+            ui.WarningIndicator(
+                _tag(reading_tag(k, "warning"), "string", ""),
+                name=reading_tag(k, "warning_ind"),
+                hidden=_tag(reading_tag(k, "warning_hidden"), "boolean", True),
+                can_cancel=False,
+                position=index * 2 + 2,
+            )
+        )
+    return children
+
+
 class PumpControlUI(ui.UI):
     async def setup(self):
-        from .application import parse_pumps  # avoid an import cycle
+        from .application import parse_pumps, parse_readings  # avoid an import cycle
 
         if self.config.role.value == ROLE_AUTO_FILL:
             self._setup_auto_fill()
@@ -156,6 +195,18 @@ class PumpControlUI(ui.UI):
                     status=_tag(tag_key(pump["target"], "state"), "string", "Unknown"),
                     children=pump_elements(pump),
                     position=10 + index,
+                )
+            )
+
+        readings = parse_readings(self.config)
+        if readings:
+            self.add_element(
+                ui.Submodule(
+                    "Readings",
+                    name="readings",
+                    status=_tag("readings_status", "string", READING_NO_DATA),
+                    children=reading_elements(readings),
+                    position=100,
                 )
             )
 

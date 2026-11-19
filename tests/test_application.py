@@ -343,3 +343,118 @@ async def test_start_and_stop_are_bound_to_their_hidden_tags():
     assert "p_pump_1_start_hidden" in str(elements["p_pump_1_start"]["hidden"])
     assert "p_pump_1_start_hidden" in str(elements["p_pump_1_minutes"]["hidden"])
     assert "p_pump_1_stop_hidden" in str(elements["p_pump_1_stop"]["hidden"])
+
+
+READINGS_CONFIG = {
+    **PUMP_CONFIG,
+    "auto_fill_device": None,
+    "auto_fill_app_key": None,
+    "readings": [
+        {
+            "name": "Pressure 1",
+            "key": "pressure_1",
+            "input_path": "$io_state.pressure_1",
+            "input_type": "Analog",
+            "input_min": 4,
+            "input_max": 20,
+            "value_min": 0,
+            "value_max": 145,
+            "units": "PSI",
+            "precision": 1,
+        },
+        {
+            "name": "Engine RPM (provisional)",
+            "input_path": "$io_state.modbus_7",
+            "input_type": "Scaled",
+            "multiplier": 1,
+            "offset": 0,
+            "precision": 0,
+        },
+        {
+            "name": "Switched Off",
+            "key": "off",
+            "enabled": False,
+            "input_path": "$io_state.off",
+        },
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_readings_parse_and_toggle():
+    app = await make_app(READINGS_CONFIG)
+    keys = [r["key"] for r in app.readings]
+    assert keys == ["pressure_1", "engine_rpm_provisional"]  # only the toggle drops one
+
+
+@pytest.mark.asyncio
+async def test_readings_deploy_with_no_data_is_clean():
+    app = await make_app(READINGS_CONFIG)
+    await app.on_deployment(None)
+    assert tag(app, "r_pressure_1") is None
+    assert tag(app, "r_pressure_1_status") == "No reading yet"
+    assert tag(app, "r_pressure_1_warning_hidden") is True
+    assert tag(app, "readings_status") == "No reading yet"
+
+
+@pytest.mark.asyncio
+async def test_readings_publish_value_raw_and_fault():
+    app = await make_app(READINGS_CONFIG)
+    await app.on_message_create(msg("io_state", {"pressure_1": 12.0, "modbus_7": 1580}))
+    assert tag(app, "r_pressure_1") == pytest.approx(72.5)
+    assert tag(app, "r_pressure_1_raw") == 12.0
+    assert tag(app, "r_pressure_1_fault") is False
+    assert tag(app, "r_engine_rpm_provisional") == 1580
+    assert tag(app, "readings_status") == "OK"
+
+    # the loop goes dead: still published, as a fault with no value
+    await app.on_message_create(msg("io_state", {"pressure_1": 0}))
+    assert tag(app, "r_pressure_1") is None
+    assert tag(app, "r_pressure_1_raw") == 0
+    assert tag(app, "r_pressure_1_fault") is True
+    assert tag(app, "r_pressure_1_warning_hidden") is False
+    assert "sensor fault" in tag(app, "r_pressure_1_warning")
+    assert tag(app, "readings_status") == "1 sensor fault"
+    # a message without the field leaves it alone
+    await app.on_message_create(msg("io_state", {"modbus_7": 1590}))
+    assert tag(app, "r_pressure_1_fault") is True
+
+
+@pytest.mark.asyncio
+async def test_readings_go_stale_on_schedule_and_keep_value():
+    app = await make_app(READINGS_CONFIG)
+    await app.on_message_create(msg("io_state", {"modbus_7": 1580}))
+    sent = tag(app, "r_engine_rpm_provisional_ts")
+    app._now = lambda: sent + 3 * 3_600_000
+    await app.on_schedule(None)
+    assert tag(app, "r_engine_rpm_provisional") == 1580
+    assert tag(app, "r_engine_rpm_provisional_status") == "Stale"
+    assert "no new reading for 3 h" in tag(app, "r_engine_rpm_provisional_warning")
+
+
+@pytest.mark.asyncio
+async def test_readings_seeded_from_aggregate_on_deploy():
+    api = FakeApi(aggregates={(None, "io_state"): {"pressure_1": 0.0, "modbus_7": 362}})
+    app = await make_app(READINGS_CONFIG, api=api)
+    await app.on_deployment(None)
+    assert tag(app, "r_pressure_1_fault") is True
+    assert tag(app, "r_engine_rpm_provisional") == 362
+    assert tag(app, "readings_status") == "1 sensor fault"
+
+
+@pytest.mark.asyncio
+async def test_readings_ui_section():
+    app = await make_app(READINGS_CONFIG)
+    from pump_control.app_ui import reading_elements
+
+    elements = {e.name: e.to_dict() for e in reading_elements(app.readings)}
+    assert set(elements) == {
+        "r_pressure_1",
+        "r_pressure_1_warning_ind",
+        "r_engine_rpm_provisional",
+        "r_engine_rpm_provisional_warning_ind",
+    }
+    assert elements["r_pressure_1"]["units"] == "PSI"
+    assert "r_pressure_1_warning_hidden" in str(
+        elements["r_pressure_1_warning_ind"]["hidden"]
+    )

@@ -8,6 +8,8 @@ The same app runs in two roles:
 
 * Pump: on the device with the pumps. Reads each pump's run state (and fault)
   from message paths, tracks run hours and starts, and sends commands.
+  Optional Readings (pressures, engine data, ...) are scaled, published as
+  tags and shown under the pumps.
 * Auto-fill (storage): on the tank the pump fills. Owns the fill settings,
   which operators edit on the page, and shows the fill state from the linked
   pump's reported state (read from the pump device with extended permissions).
@@ -94,6 +96,56 @@ def parse_pumps(cfg: PumpControlConfig) -> list[dict]:
     return pumps
 
 
+def _opt_number(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _num(value: Any, default: float) -> float:
+    number = _opt_number(value)
+    return default if number is None else number
+
+
+def parse_readings(cfg: PumpControlConfig) -> list[dict]:
+    """The enabled readings as plain dicts. A reading switched off in config is
+    left out; nothing else is. A later duplicate key is dropped (keys name the
+    tags and UI elements)."""
+    readings: list[dict] = []
+    seen: set[str] = set()
+    for index, elem in enumerate(cfg.readings.elements or []):
+        if elem.enabled.value is False:
+            continue
+        name = (elem.name.value or "").strip() or f"Reading {index + 1}"
+        key = model.reading_key(elem.key.value or "") or model.reading_key(name)
+        if key in seen:
+            log.warning("Duplicate reading key %r ignored.", key)
+            continue
+        seen.add(key)
+        readings.append(
+            {
+                "name": name,
+                "key": key,
+                "path": _parse_path(elem.input_path.value, f"{name} input path"),
+                "input_type": elem.input_type.value or model.INPUT_ANALOG,
+                "input_min": _num(elem.input_min.value, 4.0),
+                "input_max": _num(elem.input_max.value, 20.0),
+                "value_min": _num(elem.value_min.value, 0.0),
+                "value_max": _num(elem.value_max.value, 100.0),
+                "multiplier": _num(elem.multiplier.value, 1.0),
+                "offset": _num(elem.offset.value, 0.0),
+                "units": (elem.units.value or "").strip(),
+                "precision": int(_num(elem.precision.value, 1)),
+                "warn_low": _opt_number(elem.warn_low.value),
+                "warn_high": _opt_number(elem.warn_high.value),
+            }
+        )
+    return readings
+
+
 def _as_number(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -130,7 +182,11 @@ class PumpControlApplication(Application):
         self.confirm_timeout_s = float(cfg.confirm_timeout_s.value or 120)
         self.pumps = parse_pumps(cfg) if self.role == model.ROLE_PUMP else []
         self.pumps_by_slug = {p["slug"]: p for p in self.pumps}
+        self.readings = parse_readings(cfg) if self.role == model.ROLE_PUMP else []
+        stale_min = _opt_number(cfg.reading_stale_after_min.value)
+        self.stale_after_s = (stale_min or 120.0) * 60
         self._aggregates: dict[str, dict] = {}
+        self._aggregate_times: dict[str, float | None] = {}
 
     # ------------------------------------------------------------------ events
 
@@ -143,8 +199,13 @@ class PumpControlApplication(Application):
         else:
             for pump in self.pumps:
                 await self._set(model.tag_key(pump["target"], "name"), pump["name"])
+            for reading in self.readings:
+                await self._set(
+                    model.reading_tag(reading["key"], "name"), reading["name"]
+                )
             await self._publish_pump_settings(now)
             await self._refresh_pumps_from_aggregates(now)
+            await self._refresh_readings_from_aggregates(now)
             await self._refresh_banner()
 
     async def on_schedule(self, event: ScheduleEvent):
@@ -153,6 +214,7 @@ class PumpControlApplication(Application):
             await self._refresh_fill(now)
         else:
             await self._refresh_pumps_from_aggregates(now)
+            await self._refresh_readings(now)
             await self._refresh_banner()
 
     async def on_message_create(self, event: MessageCreateEvent):
@@ -171,6 +233,20 @@ class PumpControlApplication(Application):
         if self.role == model.ROLE_AUTO_FILL:
             await self._refresh_fill(now)
             return
+
+        msg_ts = self._message_time(event, now)
+        changed = False
+        for reading in self.readings:
+            path = reading["path"]
+            if path is None or path[0] != channel:
+                continue
+            raw = model.extract_path(data, path[1])
+            if model.is_missing(raw):
+                continue
+            await self._update_reading(reading, raw, msg_ts, now)
+            changed = True
+        if changed:
+            await self._refresh_readings_summary()
 
         touched = False
         for pump in self.pumps:
@@ -211,6 +287,16 @@ class PumpControlApplication(Application):
             )
         return reading
 
+    @staticmethod
+    def _message_time(event, now: float) -> float:
+        """When the message was sent (from its id), never later than now."""
+        try:
+            ts = event.message.timestamp
+            ts = ts() if callable(ts) else ts
+            return min(now, ts.timestamp() * 1000)
+        except Exception:
+            return now
+
     async def _channel_aggregate(
         self, channel: str, agent_id: int | None = None
     ) -> dict:
@@ -218,6 +304,10 @@ class PumpControlApplication(Application):
         if key not in self._aggregates:
             agg = await self.api.fetch_channel_aggregate(channel, agent_id=agent_id)
             self._aggregates[key] = getattr(agg, "data", None) or {}
+            updated = getattr(agg, "last_updated", None)
+            self._aggregate_times[key] = (
+                updated.timestamp() * 1000 if updated is not None else None
+            )
         return self._aggregates[key]
 
     def _device_name(self, device_id) -> str:
@@ -304,6 +394,75 @@ class PumpControlApplication(Application):
         )
         await self._set(model.tag_key(t, "start_hidden"), not show_start)
         await self._set(model.tag_key(t, "stop_hidden"), not show_stop)
+
+    # ------------------------------------------------------------------ readings
+
+    async def _update_reading(self, reading: dict, raw, ts: float, now: float):
+        """A new raw value for a reading, received at ``ts``."""
+        k = reading["key"]
+        await self._set(model.reading_tag(k, "raw"), raw)
+        await self._set(model.reading_tag(k, "ts"), int(ts))
+        await self._show_reading(reading, raw, ts, now)
+
+    async def _show_reading(self, reading: dict, raw, ts: float | None, now: float):
+        """Publish a reading's value, fault and status tags from its raw value."""
+        k = reading["key"]
+        result = model.evaluate_reading(reading, raw, ts, now, self.stale_after_s)
+        value = result["value"]
+        if value is not None:
+            value = round(value, max(int(reading["precision"]), 0) + 2)
+        await self._set(model.reading_tag(k), value)
+        await self._set(
+            model.reading_tag(k, "fault"), result["fault"] if raw is not None else None
+        )
+        await self._set(model.reading_tag(k, "status"), result["status"])
+        await self._set(model.reading_tag(k, "warning"), result["warning"])
+        await self._set(model.reading_tag(k, "warning_hidden"), not result["warning"])
+
+    async def _refresh_readings(self, now: float):
+        """Schedule tick: move each reading's age on (stale or not)."""
+        for reading in self.readings:
+            k = reading["key"]
+            await self._show_reading(
+                reading,
+                self._tag(model.reading_tag(k, "raw")),
+                self._tag(model.reading_tag(k, "ts")),
+                now,
+            )
+        await self._refresh_readings_summary()
+
+    async def _refresh_readings_from_aggregates(self, now: float):
+        """Deployment: pick up each reading's current raw value from its channel's
+        aggregate, then re-show it all (a config change may have changed the
+        scaling)."""
+        for reading in self.readings:
+            path = reading["path"]
+            if path is None:
+                continue
+            k = reading["key"]
+            try:
+                data = await self._channel_aggregate(path[0])
+            except Exception as e:  # no channel yet: nothing reported
+                log.info("No aggregate on %s yet: %s", path[0], e)
+                continue
+            raw = model.extract_path(data, path[1])
+            if model.is_missing(raw):
+                continue
+            known_ts = self._tag(model.reading_tag(k, "ts"))
+            if known_ts is None or self._tag(model.reading_tag(k, "raw")) != raw:
+                ts = self._aggregate_times.get(f"/{path[0]}") or now
+                await self._set(model.reading_tag(k, "raw"), raw)
+                await self._set(model.reading_tag(k, "ts"), int(min(ts, now)))
+        await self._refresh_readings(now)
+
+    async def _refresh_readings_summary(self):
+        if not self.readings:
+            return
+        statuses = [
+            self._tag(model.reading_tag(r["key"], "status")) or model.READING_NO_DATA
+            for r in self.readings
+        ]
+        await self._set("readings_status", model.readings_summary(statuses))
 
     async def _handle_reply(self, data: dict):
         """An edge reply on the Command Channel: {"request_id", "ok", "error"}."""

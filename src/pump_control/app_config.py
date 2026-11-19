@@ -7,7 +7,14 @@ from pydoover.processor import (
     ScheduleConfig,
 )
 
-from .model import MODE_LATCHED, MODE_TIMED, ROLE_AUTO_FILL, ROLE_PUMP
+from .model import (
+    INPUT_ANALOG,
+    INPUT_SCALED,
+    MODE_LATCHED,
+    MODE_TIMED,
+    ROLE_AUTO_FILL,
+    ROLE_PUMP,
+)
 
 
 class PumpConfig(config.Object):
@@ -78,6 +85,135 @@ class PumpConfig(config.Object):
     )
 
 
+class ReadingConfig(config.Object):
+    name = config.String(
+        "Name",
+        name="name",
+        description="What operators call this reading, e.g. 'Suction Pressure' or 'Engine RPM'.",
+        default="Reading 1",
+        position=1,
+    )
+    key = config.String(
+        "Key",
+        name="key",
+        description=(
+            "Short id used in this reading's tags (r_<key>, r_<key>_raw, "
+            "r_<key>_fault), e.g. 'suction_pressure'. Letters, digits and "
+            "underscores. Left blank, it is made from the name."
+        ),
+        default="",
+        required=False,
+        position=2,
+    )
+    enabled = config.Boolean(
+        "Enabled",
+        name="enabled",
+        description=(
+            "Switch the reading off where it doesn't exist on this device. An "
+            "enabled reading is always shown, even while faulted or stale."
+        ),
+        default=True,
+        position=3,
+    )
+    input_path = config.String(
+        "Input Message Path",
+        name="input_path",
+        description=(
+            "Message path to the raw value, e.g. '$io_state.pressure_1'. Keep "
+            "its channel in Subscription."
+        ),
+        default="$io_state.reading_1",
+        position=4,
+    )
+    input_type = config.Enum(
+        "Input Type",
+        name="input_type",
+        choices=[INPUT_ANALOG, INPUT_SCALED],
+        default=INPUT_ANALOG,
+        description=(
+            "Analog: a raw signal (e.g. 4-20 mA) mapped linearly from the input "
+            "range to the value range; well outside the input range is a sensor "
+            "fault. Scaled: value = raw x Multiplier + Offset."
+        ),
+        position=5,
+    )
+    input_min = config.Number(
+        "Input Min",
+        name="input_min",
+        description="Analog: raw input at the bottom of the range, e.g. 4 (mA).",
+        default=4.0,
+        position=6,
+    )
+    input_max = config.Number(
+        "Input Max",
+        name="input_max",
+        description="Analog: raw input at the top of the range, e.g. 20 (mA).",
+        default=20.0,
+        position=7,
+    )
+    value_min = config.Number(
+        "Value Min",
+        name="value_min",
+        description="Analog: the value at Input Min, in Units.",
+        default=0.0,
+        position=8,
+    )
+    value_max = config.Number(
+        "Value Max",
+        name="value_max",
+        description="Analog: the value at Input Max, in Units.",
+        default=100.0,
+        position=9,
+    )
+    multiplier = config.Number(
+        "Multiplier",
+        name="multiplier",
+        description="Scaled: value = raw x Multiplier + Offset.",
+        default=1.0,
+        position=10,
+    )
+    offset = config.Number(
+        "Offset",
+        name="offset",
+        description="Scaled: added after the Multiplier.",
+        default=0.0,
+        position=11,
+    )
+    units = config.String(
+        "Units",
+        name="units",
+        description="Shown after the value, e.g. 'PSI' or 'rpm'. Blank for none.",
+        default="",
+        required=False,
+        position=12,
+    )
+    precision = config.Integer(
+        "Decimal Precision",
+        name="precision",
+        description="Decimal places shown.",
+        default=1,
+        minimum=0,
+        maximum=6,
+        position=13,
+    )
+    warn_low = config.Number(
+        "Low Warning",
+        name="warn_low",
+        description="Optional: show a warning while the value is below this.",
+        default=None,
+        required=False,
+        position=14,
+    )
+    warn_high = config.Number(
+        "High Warning",
+        name="warn_high",
+        description="Optional: show a warning while the value is above this.",
+        default=None,
+        required=False,
+        position=15,
+    )
+
+
 class LevelSource(config.Object):
     app_name = config.ApplicationInstall(
         "Application",
@@ -141,6 +277,33 @@ class PumpControlConfig(config.Schema):
         required=False,
         show_if=_pump_role,
         position=4,
+    )
+
+    readings = config.Array(
+        "Readings",
+        name="readings",
+        element=ReadingConfig("Reading"),
+        description=(
+            "Optional telemetry shown under the pumps, e.g. pressures or engine "
+            "data, each published as tags for other apps."
+        ),
+        default=[],
+        required=False,
+        show_if=_pump_role,
+        position=13,
+    )
+    reading_stale_after_min = config.Number(
+        "Reading Stale After (min)",
+        name="reading_stale_after_min",
+        description=(
+            "A reading with no new value for this long is shown as stale, with "
+            "its age. It stays on the page with its last value."
+        ),
+        default=120.0,
+        minimum=1.0,
+        show_if=_pump_role,
+        advanced=True,
+        position=14,
     )
 
     # -- Auto-fill role -------------------------------------------------------
@@ -269,7 +432,7 @@ class PumpControlConfig(config.Schema):
     )
     schedule = ScheduleConfig(
         default="rate(5 minutes)",
-        description="Periodic refresh: run hours, command timeouts and the linked device's state.",
+        description="Periodic refresh: run hours, command timeouts, reading ages and the linked device's state.",
         advanced=True,
         position=25,
     )

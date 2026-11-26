@@ -7,7 +7,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/getdoover/pump-control/blob/main/LICENSE)
 
-[Overview](#overview) • [Roles](#roles) • [Readings](#readings) • [Configuration](#configuration) • [Tags](#tags) • [Channels](#channels)
+[Overview](#overview) • [Roles](#roles) • [Readings](#readings) • [Configuration](#configuration) • [Input Addresses](#input-addresses) • [Tags](#tags) • [Channels](#channels)
 
 <br/>
 
@@ -53,7 +53,7 @@ Install it on the device that has the pumps. Each configured pump gets its own s
 | Element | Shows |
 |---------|-------|
 | **State** | Running, Stopped or Unknown, from the Run State Input Path |
-| **Fault** | A warning while the Fault Input Path is truthy |
+| **Fault** | A warning while the pump reports a fault |
 | **Command** | The last command and where it stands: sent, accepted by the controller, confirmed, or not confirmed in time |
 | **Start For (min)** / **Start** | A Timed start for the entered minutes (Latched pumps have Start only) |
 | **Stop** | Stops the pump |
@@ -149,8 +149,8 @@ Each entry in **Pumps**:
 |---------|-----|-------------|---------|
 | **Name** | `name` | What operators call the pump | `Pump 1` |
 | **Target ID** | `target` | The pump's output id on the edge controller | `pump_1` |
-| **Run State Input Path** | `run_state_path` | Message path to the run state, truthy while running | `$io_state.pump_1` |
-| **Fault Input Path** | `fault_path` | Optional message path to a fault input, truthy in fault | blank |
+| **Run State Input Path** | `run_state_path` | The run state, truthy while running. Blank uses the automatic address | blank |
+| **Fault Input Path** | `fault_path` | The fault input, truthy in fault. Blank uses the automatic address | blank |
 | **Default Run Duration (min)** | `default_run_min` | Run time a Timed start offers | `60.0` |
 | **Max Run Duration (min)** | `max_run_min` | Longest run time allowed | `720.0` |
 | **Mode** | `mode` | `Timed` or `Latched` | `Timed` |
@@ -162,7 +162,7 @@ Each entry in **Readings**:
 | **Name** | `name` | What operators call the reading, e.g. `Suction Pressure` | `Reading 1` |
 | **Key** | `key` | Id used in the reading's tags; made from the name when blank | blank |
 | **Enabled** | `enabled` | Off leaves the reading out entirely; on, it is always shown | `true` |
-| **Input Message Path** | `input_path` | Message path to the raw value | `$io_state.reading_1` |
+| **Input Message Path** | `input_path` | The raw value. Blank uses the automatic address | blank |
 | **Input Type** | `input_type` | `Analog` or `Scaled` | `Analog` |
 | **Input Min / Input Max** | `input_min`, `input_max` | Analog: the raw input range | `4`, `20` |
 | **Value Min / Value Max** | `value_min`, `value_max` | Analog: the values at the ends of the input range | `0`, `100` |
@@ -171,14 +171,57 @@ Each entry in **Readings**:
 | **Decimal Precision** | `precision` | Decimal places shown | `1` |
 | **Low Warning / High Warning** | `warn_low`, `warn_high` | Optional limits that raise a warning on the page | none |
 
-Input paths take the form `$channel.path.to.value` (or `$channel:path.to.value`), read
-from each message on a subscribed channel; keep every channel used in a path in
-**Subscription**. A value is truthy when it is `true`, a non-zero number, or a string such as
-`on`, `running` or `1`.
+Leave an input path blank and the app reads it from its automatic address (see
+[Input Addresses](#input-addresses)). To read it from somewhere else, give a path of the
+form `$channel.path.to.value` (or `$channel:path.to.value`), read from each message on a
+subscribed channel; keep every channel used in a path in **Subscription**. A value is
+truthy when it is `true`, a non-zero number, or a string such as `on`, `running` or `1`.
 
 To link a pump and a tank, install the Pump role on the pump's device first, then the
 Auto-fill role on the tank with **Pump Device**, **Pump App Key** and **Pump Target ID**
 pointing at it. Add each side's device under the other's **Devices** so it can read it.
+
+<br/>
+
+## Input Addresses
+
+Every input has a fixed point id, and with its path left blank the app reads it from
+
+```
+$io_state.<app key>.<point id>        e.g.  $io_state.pump_control_1.pump_1
+```
+
+so the edge bridge only has to publish each value under this install's app key, and the
+inputs are wired up in one place: the bridge's map. The point ids are:
+
+| Input | Point id |
+|-------|----------|
+| A pump's run state | its Target ID, e.g. `pump_1` (the same id commands use) |
+| A pump's fault | its Target ID + `_fault`, e.g. `pump_1_fault` |
+| A reading | its Key (made from the name when blank), e.g. `suction_pressure` |
+
+A pump's fault on its automatic address shows nothing until a value first arrives;
+from then on it is shown, like any other input. An explicit path always wins over the
+automatic address.
+
+The app lists its inputs in the `io_points` tag, so a bridge can offer them by name:
+
+```json
+{"version": 1, "points": [
+  {"id": "pump_1", "label": "Pump 1", "kind": "output",
+   "path": "$io_state.pump_control_1.pump_1", "auto": true},
+  {"id": "pump_1_fault", "label": "Pump 1 fault", "kind": "input",
+   "path": "$io_state.pump_control_1.pump_1_fault", "auto": true},
+  {"id": "suction_pressure", "label": "Suction Pressure", "kind": "input",
+   "path": "$io_state.pump_control_1.suction_pressure", "auto": true}
+]}
+```
+
+`kind` is `output` for a pump (commands carry it as `target`, and its run state arrives
+on `path`) and `input` for anything read-only. `path` is the path the app reads and `auto`
+whether it is the automatic address. Pumps come first, then faults and readings, in
+config order; a reading switched off is left out. The Auto-fill role reads no inputs and
+publishes an empty list.
 
 <br/>
 
@@ -191,6 +234,7 @@ Pump role, one set per pump, keyed by its Target ID (`p_<target>_<field>`):
 | `p_<target>_running` | Reported run state (`true` / `false`, null until reported) |
 | `p_<target>_state` | `Running`, `Stopped` or `Unknown` |
 | `p_<target>_fault` | Reported fault state |
+| `p_<target>_fault_seen` | `true` once a fault value has ever arrived |
 | `p_<target>_name` | The pump's name |
 | `p_<target>_last_started`, `p_<target>_last_stopped` | Unix ms |
 | `p_<target>_ends_at` | Unix ms a timed run sent from here is due to end |
@@ -207,6 +251,8 @@ Readings, one set per enabled reading, keyed by its Key (`r_<key>_<field>`):
 | `r_<key>_ts` | Unix ms the last raw input arrived |
 | `r_<key>_status` | `OK`, `Low`, `High`, `Sensor fault`, `Stale` or `No reading yet` |
 | `r_<key>_name` | The reading's name |
+
+`io_points` lists the inputs (see [Input Addresses](#input-addresses)).
 
 Another app on the device consumes a reading through `{app_name, tag_name}`, e.g. a pump
 analysis taking suction pressure from `pump_control_1` / `r_pressure_1`. Because a faulted
@@ -228,8 +274,8 @@ Auto-fill role:
 
 ### Inputs
 
-Raw run-state, fault and reading values arrive as messages on the channels in the input paths
-(by default `io_state`), and buttons on `ui_cmds`. The Auto-fill role reads its level from
+Raw run-state, fault and reading values arrive as messages on `io_state`, under this
+install's app key (or on the channels in any explicit input paths), and buttons on `ui_cmds`. The Auto-fill role reads its level from
 another app's tag on the same device, and the linked pump's tags from the pump device.
 
 ### Commands

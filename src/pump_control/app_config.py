@@ -39,18 +39,22 @@ class PumpConfig(config.Object):
         "Run State Input Path",
         name="run_state_path",
         description=(
-            "Message path to the pump's reported run state, truthy while it is "
-            "running. Use '$channel.path.to.value', e.g. '$io_state.pump_1'."
+            "The pump's reported run state, truthy while it is running. Leave "
+            "blank to use this input's automatic address, which the edge bridge "
+            "fills in. Or give a message path, e.g. '$io_state.x'."
         ),
-        default="$io_state.pump_1",
+        default="",
+        required=False,
         position=3,
     )
     fault_path = config.String(
         "Fault Input Path",
         name="fault_path",
         description=(
-            "Optional message path to the pump's fault input, truthy while in "
-            "fault, e.g. '$io_state.pump_1_fault'. Leave blank if there is none."
+            "The pump's fault input, truthy while in fault; shown once a value "
+            "has arrived. Leave blank to use this input's automatic address, "
+            "which the edge bridge fills in. Or give a message path, e.g. "
+            "'$io_state.x'."
         ),
         default="",
         required=False,
@@ -119,10 +123,12 @@ class ReadingConfig(config.Object):
         "Input Message Path",
         name="input_path",
         description=(
-            "Message path to the raw value, e.g. '$io_state.pressure_1'. Keep "
-            "its channel in Subscription."
+            "The raw value. Leave blank to use this input's automatic address, "
+            "which the edge bridge fills in. Or give a message path, e.g. "
+            "'$io_state.x'."
         ),
-        default="$io_state.reading_1",
+        default="",
+        required=False,
         position=4,
     )
     input_type = config.Enum(

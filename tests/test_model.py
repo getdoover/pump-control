@@ -388,3 +388,47 @@ def test_reading_keys_and_summary():
     )
     assert model.format_age(90 * 60) == "1 h 30 min"
     assert model.format_age(26 * 3600) == "1 d 2 h"
+
+
+def test_resolve_path_blank_is_automatic_explicit_wins():
+    assert model.resolve_path("", "pump_control_2", "pump_1") == (
+        ("io_state", ["pump_control_2", "pump_1"]),
+        True,
+    )
+    assert model.resolve_path(None, "pump_control_2", "pump_1")[1] is True
+    assert model.resolve_path("  ", "pump_control_2", "pump_1")[1] is True
+    assert model.resolve_path("$io_state.pump_1", "pump_control_2", "pump_1") == (
+        ("io_state", ["pump_1"]),
+        False,
+    )
+    assert model.resolve_path("$on_dm_event.x", "k", "p") == (
+        ("on_dm_event", ["x"]),
+        False,
+    )
+    with pytest.raises(ValueError):
+        model.resolve_path("io_state.pump_1", "k", "p")
+
+
+def test_format_path_round_trips():
+    path, _ = model.resolve_path("", "pump_control_1", "pressure_1")
+    assert model.format_path(path) == "$io_state.pump_control_1.pressure_1"
+    assert model.parse_message_path(model.format_path(path)) == path
+
+
+def test_io_points_duplicate_ids_keep_the_first():
+    pumps = [
+        {
+            "target": "a",
+            "name": "A",
+            "state_path": ("io_state", ["k", "a"]),
+            "state_auto": True,
+            "fault_path": ("io_state", ["k", "a_fault"]),
+            "fault_auto": True,
+        },
+    ]
+    readings = [
+        {"key": "a_fault", "name": "Dup", "path": ("io_state", ["x"]), "auto": False}
+    ]
+    points = model.io_points(pumps, readings)["points"]
+    assert [p["id"] for p in points] == ["a", "a_fault"]
+    assert points[1]["label"] == "A fault"

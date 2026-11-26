@@ -53,17 +53,20 @@ STAT_FIELDS = (
 )
 
 
-def _parse_path(value: Any, what: str):
+def _resolve_path(value: Any, app_key: str | None, point_id: str, what: str):
+    """(path, auto) for an input: explicit wins, blank is the automatic address
+    ($io_state.<app_key>.<point id>). A malformed path is ignored with a warning."""
     try:
-        return model.parse_message_path(value)
+        return model.resolve_path(value, app_key, point_id)
     except ValueError as e:
         log.warning("Ignoring %s: %s", what, e)
-        return None
+        return None, False
 
 
-def parse_pumps(cfg: PumpControlConfig) -> list[dict]:
+def parse_pumps(cfg: PumpControlConfig, app_key: str | None = None) -> list[dict]:
     """The configured pumps as plain dicts. Entries without a target are skipped,
-    and a later duplicate target is dropped (targets key the tags and buttons)."""
+    and a later duplicate target is dropped (targets key the tags and buttons).
+    A blank input path resolves to its automatic address under ``app_key``."""
     pumps: list[dict] = []
     seen: set[str] = set()
     for elem in cfg.pumps.elements:
@@ -77,17 +80,24 @@ def parse_pumps(cfg: PumpControlConfig) -> list[dict]:
         seen.add(s)
         default_min = float(elem.default_run_min.value or 60.0)
         max_min = float(elem.max_run_min.value or 720.0)
+        state_path, state_auto = _resolve_path(
+            elem.run_state_path.value, app_key, target, f"{target} run state path"
+        )
+        fault_path, fault_auto = _resolve_path(
+            elem.fault_path.value,
+            app_key,
+            model.fault_point(target),
+            f"{target} fault path",
+        )
         pumps.append(
             {
                 "name": (elem.name.value or "").strip() or target,
                 "target": target,
                 "slug": s,
-                "state_path": _parse_path(
-                    elem.run_state_path.value, f"{target} run state path"
-                ),
-                "fault_path": _parse_path(
-                    elem.fault_path.value, f"{target} fault path"
-                ),
+                "state_path": state_path,
+                "state_auto": state_auto,
+                "fault_path": fault_path,
+                "fault_auto": fault_auto,
                 "default_run_min": min(default_min, max_min),
                 "max_run_min": max_min,
                 "mode": elem.mode.value or model.MODE_TIMED,
@@ -110,10 +120,11 @@ def _num(value: Any, default: float) -> float:
     return default if number is None else number
 
 
-def parse_readings(cfg: PumpControlConfig) -> list[dict]:
+def parse_readings(cfg: PumpControlConfig, app_key: str | None = None) -> list[dict]:
     """The enabled readings as plain dicts. A reading switched off in config is
     left out; nothing else is. A later duplicate key is dropped (keys name the
-    tags and UI elements)."""
+    tags and UI elements). A blank input path resolves to the automatic address
+    under ``app_key``, with the key as its point id."""
     readings: list[dict] = []
     seen: set[str] = set()
     for index, elem in enumerate(cfg.readings.elements or []):
@@ -125,11 +136,15 @@ def parse_readings(cfg: PumpControlConfig) -> list[dict]:
             log.warning("Duplicate reading key %r ignored.", key)
             continue
         seen.add(key)
+        path, auto = _resolve_path(
+            elem.input_path.value, app_key, key, f"{name} input path"
+        )
         readings.append(
             {
                 "name": name,
                 "key": key,
-                "path": _parse_path(elem.input_path.value, f"{name} input path"),
+                "path": path,
+                "auto": auto,
                 "input_type": elem.input_type.value or model.INPUT_ANALOG,
                 "input_min": _num(elem.input_min.value, 4.0),
                 "input_max": _num(elem.input_max.value, 20.0),
@@ -180,9 +195,10 @@ class PumpControlApplication(Application):
             cfg.settings_channel.value or "control_settings"
         ).strip()
         self.confirm_timeout_s = float(cfg.confirm_timeout_s.value or 120)
-        self.pumps = parse_pumps(cfg) if self.role == model.ROLE_PUMP else []
+        pump_role = self.role == model.ROLE_PUMP
+        self.pumps = parse_pumps(cfg, self.app_key) if pump_role else []
         self.pumps_by_slug = {p["slug"]: p for p in self.pumps}
-        self.readings = parse_readings(cfg) if self.role == model.ROLE_PUMP else []
+        self.readings = parse_readings(cfg, self.app_key) if pump_role else []
         stale_min = _opt_number(cfg.reading_stale_after_min.value)
         self.stale_after_s = (stale_min or 120.0) * 60
         self._aggregates: dict[str, dict] = {}
@@ -192,6 +208,7 @@ class PumpControlApplication(Application):
 
     async def on_deployment(self, event: DeploymentEvent):
         now = self._now()
+        await self._publish_io_points()
         if self.role == model.ROLE_AUTO_FILL:
             await self._init_fill_settings(now)
             await self._publish_fill_settings(now, updated_by="config")
@@ -199,6 +216,10 @@ class PumpControlApplication(Application):
         else:
             for pump in self.pumps:
                 await self._set(model.tag_key(pump["target"], "name"), pump["name"])
+                if not self._fault_shown(pump):
+                    # No fault input (yet): nothing left over from an earlier one.
+                    await self._set(model.tag_key(pump["target"], "fault"), None)
+                    await self._set(model.tag_key(pump["target"], "fault_hidden"), True)
             for reading in self.readings:
                 await self._set(
                     model.reading_tag(reading["key"], "name"), reading["name"]
@@ -210,6 +231,7 @@ class PumpControlApplication(Application):
 
     async def on_schedule(self, event: ScheduleEvent):
         now = self._now()
+        await self._publish_io_points()
         if self.role == model.ROLE_AUTO_FILL:
             await self._refresh_fill(now)
         else:
@@ -271,6 +293,20 @@ class PumpControlApplication(Application):
     async def _set(self, key: str, value):
         if self.get_tag(key) != value:
             await self.set_tag(key, value)
+
+    async def _publish_io_points(self):
+        """The io_points tag: each input's point id, label and the path read.
+        Empty in the Auto-fill role, which reads no inputs."""
+        await self._set("io_points", model.io_points(self.pumps, self.readings))
+
+    def _fault_shown(self, pump: dict) -> bool:
+        """Whether the pump has a fault input to show. An explicit path always
+        does; an automatic one only once a value has ever arrived on it."""
+        if pump["fault_path"] is None:
+            return False
+        if not pump.get("fault_auto"):
+            return True
+        return self._tag(model.tag_key(pump["target"], "fault_seen")) is True
 
     @staticmethod
     def _read(path, channel: str, data: dict) -> bool | None:
@@ -351,6 +387,7 @@ class PumpControlApplication(Application):
         current = stats.get("running")
         await self._set(model.tag_key(t, "state"), model.state_text(current))
         if fault is not None:
+            await self._set(model.tag_key(t, "fault_seen"), True)
             await self._set(model.tag_key(t, "fault"), fault)
             await self._set(model.tag_key(t, "fault_hidden"), not fault)
 

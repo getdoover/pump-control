@@ -102,6 +102,95 @@ def is_missing(value: Any) -> bool:
     return value is _MISSING
 
 
+# -- automatic input addresses ----------------------------------------------------
+
+# A blank input path reads from the input's automatic address,
+# $io_state.<app_key>.<point id>, which the edge bridge fills in.
+AUTO_CHANNEL = "io_state"
+IO_POINTS_VERSION = 1
+
+
+def resolve_path(
+    value: Any, app_key: str | None, point_id: str
+) -> tuple[tuple[str, list[str]] | None, bool]:
+    """(path, auto) for an input: an explicit '$channel.path' wins; a blank one is
+    the automatic address. Raises ValueError for a set but malformed path."""
+    path = parse_message_path(value)
+    if path is not None:
+        return path, False
+    if not app_key or not point_id:
+        return None, False
+    return (AUTO_CHANNEL, [str(app_key), str(point_id)]), True
+
+
+def format_path(path: tuple[str, list[str]] | None) -> str | None:
+    if path is None:
+        return None
+    return "$" + ".".join([path[0], *path[1]])
+
+
+def fault_point(target: str) -> str:
+    return f"{target}_fault"
+
+
+def io_points(pumps: list[dict], readings: list[dict]) -> dict:
+    """The io_points tag: every input this install reads, outputs first.
+
+    ``pumps`` and ``readings`` are the parsed config entries (empty in the
+    Auto-fill role). Inputs with no usable path are left out, as is a later
+    duplicate id.
+    """
+    outputs: list[dict] = []
+    inputs: list[dict] = []
+    for pump in pumps:
+        outputs.append(
+            _point(
+                pump["target"],
+                pump["name"],
+                "output",
+                pump["state_path"],
+                pump.get("state_auto"),
+            )
+        )
+        inputs.append(
+            _point(
+                fault_point(pump["target"]),
+                f"{pump['name']} fault",
+                "input",
+                pump["fault_path"],
+                pump.get("fault_auto"),
+            )
+        )
+    for reading in readings:
+        inputs.append(
+            _point(
+                reading["key"],
+                reading["name"],
+                "input",
+                reading["path"],
+                reading.get("auto"),
+            )
+        )
+    points: list[dict] = []
+    seen: set[str] = set()
+    for point in outputs + inputs:
+        if point["path"] is None or point["id"] in seen:
+            continue
+        seen.add(point["id"])
+        points.append(point)
+    return {"version": IO_POINTS_VERSION, "points": points}
+
+
+def _point(point_id: str, label: str, kind: str, path, auto) -> dict:
+    return {
+        "id": point_id,
+        "label": label,
+        "kind": kind,
+        "path": format_path(path),
+        "auto": bool(auto),
+    }
+
+
 def as_bool(value: Any) -> bool | None:
     """A raw run / fault input as a bool. Truthy means on; None if unreadable."""
     if value is None or value is _MISSING:

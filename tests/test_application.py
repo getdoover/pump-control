@@ -458,3 +458,178 @@ async def test_readings_ui_section():
     assert "r_pressure_1_warning_hidden" in str(
         elements["r_pressure_1_warning_ind"]["hidden"]
     )
+
+
+# -- automatic input addresses and io_points ----------------------------------------
+
+AUTO_CONFIG = {
+    "role": "Pump",
+    "pumps": [
+        {"name": "Pump 1", "target": "pump_1"},
+        {
+            "name": "Booster",
+            "target": "pump_start",
+            "run_state_path": "$io_state.booster_run",
+            "fault_path": "$io_state.booster_fault",
+        },
+    ],
+    "readings": [
+        {"name": "Suction Pressure", "key": "pressure_1", "input_type": "Scaled"},
+        {
+            "name": "Engine RPM",
+            "input_path": "$io_state.modbus_7",
+            "input_type": "Scaled",
+        },
+        {"name": "Switched Off", "key": "off", "enabled": False},
+        {"name": "Fuel Level", "input_type": "Scaled"},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_blank_paths_resolve_to_the_automatic_address():
+    app = await make_app(AUTO_CONFIG)
+    p1, booster = app.pumps
+    assert p1["state_path"] == ("io_state", ["pump_control_1", "pump_1"])
+    assert p1["state_auto"] is True
+    assert p1["fault_path"] == ("io_state", ["pump_control_1", "pump_1_fault"])
+    assert p1["fault_auto"] is True
+    # explicit paths are kept as they are
+    assert booster["state_path"] == ("io_state", ["booster_run"])
+    assert booster["state_auto"] is False
+    assert booster["fault_path"] == ("io_state", ["booster_fault"])
+    assert booster["fault_auto"] is False
+    readings = {r["key"]: r for r in app.readings}
+    assert readings["pressure_1"]["path"] == (
+        "io_state",
+        ["pump_control_1", "pressure_1"],
+    )
+    assert readings["pressure_1"]["auto"] is True
+    assert readings["engine_rpm"]["path"] == ("io_state", ["modbus_7"])
+    assert readings["engine_rpm"]["auto"] is False
+    assert readings["fuel_level"]["path"] == (
+        "io_state",
+        ["pump_control_1", "fuel_level"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_io_points_tag():
+    app = await make_app(AUTO_CONFIG)
+    await app.on_deployment(None)
+    points = tag(app, "io_points")
+    assert points["version"] == 1
+    assert [
+        (p["id"], p["label"], p["kind"], p["path"], p["auto"]) for p in points["points"]
+    ] == [
+        ("pump_1", "Pump 1", "output", "$io_state.pump_control_1.pump_1", True),
+        ("pump_start", "Booster", "output", "$io_state.booster_run", False),
+        (
+            "pump_1_fault",
+            "Pump 1 fault",
+            "input",
+            "$io_state.pump_control_1.pump_1_fault",
+            True,
+        ),
+        (
+            "pump_start_fault",
+            "Booster fault",
+            "input",
+            "$io_state.booster_fault",
+            False,
+        ),
+        (
+            "pressure_1",
+            "Suction Pressure",
+            "input",
+            "$io_state.pump_control_1.pressure_1",
+            True,
+        ),
+        ("engine_rpm", "Engine RPM", "input", "$io_state.modbus_7", False),
+        (
+            "fuel_level",
+            "Fuel Level",
+            "input",
+            "$io_state.pump_control_1.fuel_level",
+            True,
+        ),
+    ]
+    # the disabled reading is left out
+    assert "off" not in {p["id"] for p in points["points"]}
+
+    # only written when it changes
+    writes = []
+    original = app.set_tag
+
+    async def counting_set_tag(key, value, *a, **kw):
+        writes.append(key)
+        return await original(key, value, *a, **kw)
+
+    app.set_tag = counting_set_tag
+    await app.on_schedule(None)
+    assert "io_points" not in writes
+
+
+@pytest.mark.asyncio
+async def test_io_points_empty_in_auto_fill_role():
+    app = await make_app(FILL_CONFIG)
+    await app.on_deployment(None)
+    assert tag(app, "io_points") == {"version": 1, "points": []}
+
+
+@pytest.mark.asyncio
+async def test_nested_automatic_values_from_messages():
+    app = await make_app(AUTO_CONFIG)
+    await app.on_deployment(None)
+    await app.on_message_create(
+        msg("io_state", {"pump_control_1": {"pump_1": 1, "pressure_1": 3.5}})
+    )
+    assert tag(app, "p_pump_1_running") is True
+    assert tag(app, "p_pump_1_state") == "Running"
+    assert tag(app, "r_pressure_1") == pytest.approx(3.5)
+    # another install's values are not ours
+    await app.on_message_create(msg("io_state", {"pump_control_2": {"pump_1": 0}}))
+    assert tag(app, "p_pump_1_running") is True
+
+
+@pytest.mark.asyncio
+async def test_nested_automatic_values_from_the_aggregate():
+    api = FakeApi(
+        aggregates={
+            (None, "io_state"): {"pump_control_1": {"pump_1": 0, "pressure_1": 7}}
+        }
+    )
+    app = await make_app(AUTO_CONFIG, api=api)
+    await app.on_deployment(None)
+    assert tag(app, "p_pump_1_running") is False
+    assert tag(app, "r_pressure_1") == pytest.approx(7)
+
+
+@pytest.mark.asyncio
+async def test_automatic_fault_hidden_until_a_value_arrives():
+    app = await make_app(
+        AUTO_CONFIG,
+        tag_values={
+            "pump_control_1": {"p_pump_1_fault": True, "p_pump_1_fault_hidden": False}
+        },
+    )
+    await app.on_deployment(None)
+    # nothing has arrived on the automatic address: looks like no fault input
+    assert tag(app, "p_pump_1_fault") is None
+    assert tag(app, "p_pump_1_fault_hidden") is True
+    assert tag(app, "p_pump_1_fault_seen") is None
+
+    await app.on_message_create(
+        msg("io_state", {"pump_control_1": {"pump_1_fault": 1}})
+    )
+    assert tag(app, "p_pump_1_fault") is True
+    assert tag(app, "p_pump_1_fault_hidden") is False
+    assert tag(app, "p_pump_1_fault_seen") is True
+
+    # once seen, it is shown from then on, across redeploys
+    await app.on_message_create(
+        msg("io_state", {"pump_control_1": {"pump_1_fault": 0}})
+    )
+    await app.on_deployment(None)
+    assert tag(app, "p_pump_1_fault") is False
+    assert tag(app, "p_pump_1_fault_seen") is True
